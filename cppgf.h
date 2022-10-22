@@ -54,11 +54,54 @@ OTHER DEALINGS IN THE SOFTWARE.
 
 For more information, please refer to <http://unlicense.org>
 */
+#include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <cstdlib>
 
 namespace cppgf
 {
+template<uint32_t P>
+class GaloisFieldTable
+{
+public:
+    GaloisFieldTable();
+    static uint8_t mulNoLUT(uint32_t x0, uint32_t x1);
+
+    uint8_t exp_[256];
+    uint8_t log_[256];
+};
+
+template<uint32_t P>
+GaloisFieldTable<P>::GaloisFieldTable()
+{
+    ::memset(exp_, 0, sizeof(uint8_t) * 256);
+    ::memset(log_, 0, sizeof(uint8_t) * 256);
+    uint32_t x = 1;
+    for(uint32_t i = 0; i < 256; ++i) {
+        exp_[i] = x;
+        log_[x] = i;
+        x = mulNoLUT(x, 2);
+    }
+}
+
+template<uint32_t P>
+uint8_t GaloisFieldTable<P>::mulNoLUT(uint32_t x0, uint32_t x1)
+{
+    uint32_t r = 0;
+    while(0 < x1) {
+        if(0x01U == (x1 & 0x01U)) {
+            r = r ^ x0;
+        }
+        x1 = x1 >> 1;
+        x0 = x0 << 1;
+        if(256U <= x0) {
+            x0 = x0 ^ P;
+        }
+    }
+    return static_cast<uint8_t>(r&0xFFU);
+}
+
 /**
  * https://en.wikiversity.org/wiki/Reed%E2%80%93Solomon_codes_for_coders
  */
@@ -68,41 +111,94 @@ class GaloisField
 public:
     using this_type = GaloisField<P>;
 
-    explicit GaloisField(uint32_t);
+    explicit GaloisField(uint32_t size);
     ~GaloisField();
 
-    void add(this_type& x0, this_type& x1);
-    void mul(this_type& x0, this_type& x1);
-    void div(this_type& x0, this_type& x1);
+    uint32_t capacity() const;
+    uint32_t size() const;
+    void resize(uint32_t size);
 
     uint32_t eval(uint8_t x) const;
 
-private:
-    GaloisField(const GaloisField&) = delete;
-    GaloisField& operator=(const GaloisField&) = delete;
+    const uint32_t& operator[](uint32_t x) const
+    {
+        return polynomial_[x];
+    }
+
+    uint32_t& operator[](uint32_t x)
+    {
+        return polynomial_[x];
+    }
 
     static uint8_t add(uint8_t x0, uint8_t x1);
     static uint8_t sub(uint8_t x0, uint8_t x1);
     static uint8_t mul(uint8_t x0, uint8_t x1);
     static uint8_t div(uint8_t x0, uint8_t x1);
+    static uint8_t pow(uint8_t x, uint8_t p);
+    static uint8_t inverse(uint8_t x);
 
-    void mulNoLUT(uint32_t x0, uint32_t x1, uint32_t prim);
+private:
+    GaloisField(const GaloisField&) = delete;
+    GaloisField& operator=(const GaloisField&) = delete;
+    static GaloisFieldTable<P> table_;
 
-    uint8_t exp_[256];
-    uint8_t log_[256];
+    uint32_t capacity_;
+    uint32_t size_;
+    uint32_t* polynomial_;
 };
 
 template<uint32_t P>
-GaloisField<P>::GaloisField(uint32_t dim)
+GaloisField<P>::GaloisField(uint32_t size)
+    : size_(size)
+    , polynomial_(nullptr)
 {
-    ::memset(exp_, 0, sizeof(uint8_t) * 256);
-    ::memset(log_, 0, sizeof(uint8_t) * 256);
-    uint8_t x = 1;
-    for(uint8_t i = 0; i < 256; ++i) {
-        exp_[i] = x;
-        log_[i] = i;
-        x = mulNoLUT(x, 2, P);
+    assert(0 < size_);
+    capacity_ = (size_ + 0x15U) & ~0x15U;
+    polynomial_ = ::malloc(sizeof(uint32_t) * capacity_);
+    ::memset(polynomial_, 0, sizeof(uint32_t) * capacity_);
+}
+
+template<uint32_t P>
+GaloisField<P>::~GaloisField()
+{
+    ::free(polynomial_);
+    polynomial_ = nullptr;
+}
+
+template<uint32_t P>
+uint32_t GaloisField<P>::capacity() const
+{
+    return capacity_;
+}
+
+template<uint32_t P>
+uint32_t GaloisField<P>::size() const
+{
+    return size_;
+}
+
+template<uint32_t P>
+void GaloisField<P>::resize(uint32_t size)
+{
+    if(size <= capacity_) {
+        return;
     }
+    ::free(polynomial_);
+    capacity_ = (size + 0x15U) & ~0x15U;
+    size_ = size;
+    polynomial_ = ::malloc(sizeof(uint32_t) * capacity_);
+    ::memset(polynomial_, 0, sizeof(uint32_t) * capacity_);
+}
+
+template<uint32_t P>
+uint32_t GaloisField<P>::eval(uint8_t x) const
+{
+    assert(0 < size_);
+    uint8_t y = polynomial_[0];
+    for(uint32_t i = 1; i < size_; ++i) {
+        y = mul(y, x) ^ polynomial_[i];
+    }
+    return y;
 }
 
 template<uint32_t P>
@@ -120,34 +216,69 @@ uint8_t GaloisField<P>::sub(uint8_t x0, uint8_t x1)
 template<uint32_t P>
 uint8_t GaloisField<P>::mul(uint8_t x0, uint8_t x1)
 {
-    return x0 ^ x1;
+    if(0 == x0 || 0 == x1) {
+        return 0;
+    }
+    uint32_t sum = static_cast<uint32_t>(table_.log_[x0]) + table_.log_[x1];
+    if(255 <= sum) {
+        sum -= 255;
+    }
+    return table_.exp_[sum];
 }
 
 template<uint32_t P>
 uint8_t GaloisField<P>::div(uint8_t x0, uint8_t x1)
 {
-    if(0 == a || 0 == b) {
+    if(0 == x0) {
         return 0;
     }
-    cppecc_u32 sum = CPPECC_STATIC_CAST(cppecc_s32)(gflog[a]) + gflog[b];
-    if(CPPECC_GF_NW1 <= sum) {
-        sum -= CPPECC_GF_NW1;
+    if(0 == x1) {
+        return static_cast<uint8_t>(-1);
     }
-    return gfexp[sum];
+    int32_t diff = static_cast<int32_t>(table_.log_[x0]) - table_.log_[x1];
+    if(diff < 0) {
+        diff += 255;
+    }
+    return table_.exp_[diff];
 }
 
 template<uint32_t P>
-void GaloisField<P>::mulNoLUT(uint32_t x0, uint32_t x1, uint32_t prim)
+uint8_t GaloisField<P>::pow(uint8_t x, uint8_t p)
 {
-    uint32_t r = 0;
-    while(0 < x1) {
-        if(0 != (x1 & 0x01U)) {
-            r = r ^ x0;
-        }
-        x1 = x1 >> 1;
-        x0 = x0 << 1;
-        if(256U <= x0) {
-            x0 = x0 ^ prim;
+    return table_.exp_[(table_.log_[x] * p) % 255U];
+}
+
+template<uint32_t P>
+uint8_t GaloisField<P>::inverse(uint8_t x)
+{
+    return table_.exp_[255U - table_.log_[x]];
+}
+
+template<uint32_t P>
+void add(GaloisField<P>& result, const GaloisField<P>& x0, const GaloisField<P>& x1)
+{
+    uint32_t size = (std::max)(x0.size(), x1.size());
+    result.resize(size);
+
+    for(uint32_t i = 0; i < x0.size(); ++i) {
+        result[i + size - x0.size()] = x0[i];
+    }
+    for(uint32_t i = 0; i < x1.size(); ++i) {
+        result[i + size - x1.size()] ^= x1[i];
+    }
+}
+
+template<uint32_t P>
+void mul(GaloisField<P>& result, const GaloisField<P>& x0, const GaloisField<P>& x1)
+{
+    uint32_t total = x0.size() + x1.size() - 1;
+    result.resize(total);
+    for(uint32_t i = 0; i < total; ++i) {
+        result[i] = 0;
+    }
+    for(uint32_t i = 0; i < x1.size(); ++i) {
+        for(uint32_t j = 0; j < x0.size(); ++j) {
+            result[i + j] ^= GaloisField<P>::mul(x0[j], x1[i]);
         }
     }
 }
